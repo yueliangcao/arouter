@@ -1,87 +1,156 @@
 package main
 
 import (
-	"bytes"
-	"errors"
+	"bufio"
+	_ "bytes"
+	_ "errors"
 	"fmt"
 	"net"
-	"net/url"
-	"strings"
+	"net/http"
+	_ "net/url"
+	"path"
+	_ "strings"
+	"sync"
+	"time"
 )
 
-// parseRequestLine parses "GET /foo HTTP/1.1" into its three parts.
-func parseRequestLine(line string) (method, requestURI, proto string, ok bool) {
-	s1 := strings.Index(line, " ")
-	s2 := strings.Index(line[s1+1:], " ")
-	if s1 < 0 || s2 < 0 {
-		return
+var cfg *Config
+
+func getSerAddr(req *http.Request) string {
+
+	if req.URL.Path == "/" {
+		return cfg.StaticSer
 	}
-	s2 += s1 + 1
-	return line[:s1], line[s1+1 : s2], line[s2+1:], true
+
+	switch path.Ext(req.URL.Path) {
+	case "":
+		return cfg.HandleSer
+	default:
+		return cfg.StaticSer
+	}
+}
+
+type Router struct {
+	Conn    net.Conn
+	ConnMap map[string]net.Conn
+	Timeout time.Duration
+}
+
+func NewRouter(c net.Conn) Router {
+	return Router{c, map[string]net.Conn{}, time.Duration(1 * time.Hour)}
+}
+
+func (router Router) getConn(addr string) net.Conn {
+	return router.ConnMap[addr]
+}
+
+func (router Router) setConn(addr string, c net.Conn) {
+	router.ConnMap[addr] = c
+}
+
+func (router Router) delConn(addr string) {
+	if c, ok := router.ConnMap[addr]; ok {
+		c.Close()
+		delete(router.ConnMap, addr)
+	}
+}
+
+func (router Router) pipe(src net.Conn) {
+	var dst = router.Conn
+	var buf [4 << 10]byte
+	for {
+		//src.SetDeadline(time.Now().Add(router.Timeout))
+		n, err := src.Read(buf[:])
+		if err != nil {
+			return
+		}
+
+		//dst.SetDeadline(time.Now().Add(router.Timeout))
+		n, err = dst.Write(buf[:n])
+		if err != nil {
+			return
+		}
+	}
+}
+
+func (router Router) Run() (err error) {
+
+	var wg sync.WaitGroup
+	var req *http.Request
+
+	for {
+		router.Conn.SetDeadline(time.Now().Add(router.Timeout))
+		if req, err = http.ReadRequest(bufio.NewReader(router.Conn)); err != nil {
+			fmt.Println("read request err: " + err.Error())
+			break
+		}
+
+		addr := getSerAddr(req)
+
+		fmt.Printf("%s %s at %s\n", req.Method, req.RequestURI, addr)
+
+		c := router.getConn(addr)
+		if c == nil {
+			if c, err = net.Dial("tcp", addr); err != nil {
+				fmt.Println("dial err: " + err.Error())
+				fmt.Fprintf(router.Conn, "HTTP/1.1 400 dial %s err \r\n\r\n", addr)
+				break
+			}
+
+			router.setConn(addr, c)
+
+			wg.Add(1)
+			go func(c net.Conn, k string) {
+				defer wg.Done()
+				router.pipe(c)
+				router.delConn(addr)
+			}(c, addr)
+		}
+
+		if err = req.Write(c); err != nil {
+			fmt.Println("req write err: " + err.Error())
+			break
+		}
+	}
+
+	wg.Wait()
+	router.close()
+
+	return
+}
+
+func (router Router) close() {
+	router.Conn.Close()
+	for k, v := range router.ConnMap {
+		v.Close()
+		delete(router.ConnMap, k)
+	}
 }
 
 func handleConnection(conn net.Conn) (err error) {
-	defer func() {
-		conn.Close()
-	}()
 
-	fmt.Println("=== begin ===")
+	router := NewRouter(conn)
+	router.Timeout = time.Duration(30 * time.Second)
 
-	buf := make([]byte, 4<<10)
+	//fmt.Println("===begin===")
 
-	var n int
-	if n, err = conn.Read(buf); err != nil {
-		fmt.Println("frist read err: ", err.Error())
-		return
-	}
+	router.Run()
 
-	var line []byte
-	if i := bytes.IndexByte(buf[:n], '\n'); i >= 0 {
-		line = buf[:i+1]
-	}
+	//fmt.Println("===end===")
 
-	method, requestURI, proto, ok := parseRequestLine(string(line))
-	if !ok {
-		fmt.Println("parseRequestLine err")
-		return errors.New("parseRequestLine err")
-	}
-	fmt.Printf("%s %s %s \n", method, requestURI, proto)
-
-	url, err := url.ParseRequestURI(requestURI)
-	if err != nil {
-		fmt.Println("ParseRequestURI err: " + err.Error())
-		return
-	}
-
-	fmt.Println("url {")
-	fmt.Println("Scheme", url.Scheme)
-	fmt.Println("Opaque", url.Opaque)
-	fmt.Println("Host", url.Host)
-	fmt.Println("Path", url.Path)
-	fmt.Println("RawQuery", url.RawQuery)
-	fmt.Println("Fragment", url.Scheme)
-	fmt.Println("}")
-
-	var c2 net.Conn
-	c2, err = net.Dial("tcp", "localhost:8888")
-
-	c2.Write(buf[:n])
-
-	go PipeThenClose(conn, c2)
-	PipeThenClose(c2, conn)
-
-	fmt.Println("=== end ===")
-
-	return err
+	return nil
 }
 
 func main() {
-	const (
-		lnAddr = "0.0.0.0:10000"
-	)
-	fmt.Println("server start, listen to: " + lnAddr)
+	var err error
+	if cfg, err = ParseConfig("config.json"); err != nil {
+		fmt.Println("load config err: " + err.Error())
+		return
+	}
 
-	ln, err := net.Listen("tcp", lnAddr)
+	fmt.Println("server start, listen to: " + cfg.LnAddr)
+
+	ln, err := net.Listen("tcp", cfg.LnAddr)
 	if err != nil {
 		fmt.Println("net listen err: " + err.Error())
 	}

@@ -30,6 +30,12 @@ func getSerAddr(req *http.Request) string {
 	}
 }
 
+func setRequest(req *http.Request) {
+	if req.URL.Path == "/" {
+		req.URL.Path = cfg.IndexPage
+	}
+}
+
 type Router struct {
 	Conn    net.Conn
 	ConnMap map[string]net.Conn
@@ -84,6 +90,8 @@ func (router Router) Run() (err error) {
 			fmt.Println("read request err: " + err.Error())
 			break
 		}
+
+		setRequest(req)
 
 		addr := getSerAddr(req)
 

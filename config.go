@@ -11,6 +11,7 @@ type Config struct {
 	LnAddr    string `json:"ln_addr"`
 	HandleSer string `json:"handle_ser_addr"`
 	StaticSer string `json:"static_ser_addr"`
+	IndexPage string `json:"index_page"`
 }
 
 func ParseConfig(path string) (cfg *Config, err error) {

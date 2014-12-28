@@ -1,6 +1,6 @@
 {
 	"ln_addr":"0.0.0.0:7000",
 	"handle_ser_addr":"172.17.17.157:8888",
-	"static_ser_addr":"172.17.17.172:9000",
+	"static_ser_addr":"172.17.17.157:998",
 	"index_page":"/_index.html"
 }

@@ -87,6 +87,7 @@ func (router Router) Run() (err error) {
 	for {
 		router.Conn.SetDeadline(time.Now().Add(router.Timeout))
 		if req, err = http.ReadRequest(bufio.NewReader(router.Conn)); err != nil {
+			router.Conn.Close()
 			fmt.Println("read request err: " + err.Error())
 			break
 		}
